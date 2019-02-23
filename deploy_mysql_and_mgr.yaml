@@ -1,0 +1,11 @@
+---
+- hosts: mgr_search_ops
+  vars_prompt:
+    - name: "db_pass"
+      prompt: "please input the db password"
+      private: yes
+  any_errors_fatal: true
+  roles:
+#    - { role: deploy_mysql, tags: ['deploy_mysql'] }
+    - { role: deploy_mgr, tags: ['deploy_mgr'] }
+

@@ -1,0 +1,22 @@
+---
+# vars file for deploy_mgr
+mysql_port: 3333
+group: mgr_search_ops
+etc_hosts: |
+  {% for ip_list in (groups[group] | map('extract', hostvars, ['ansible_all_ipv4_addresses'])) -%} {% set iploop = loop %}
+  {% for ip in ip_list -%}
+  {% for hostname in (groups[group] | map('extract', hostvars, ['ansible_hostname'])) -%}
+  {% if loop.index == iploop.index -%}
+  {% if ip.startswith('192.168') and not ip.startswith('192.168.3') and not ip.startswith('192.168.8') -%}
+  {{ ip }}  {{ hostname }}
+  {% endif %}
+  {% endif %}
+  {% endfor %}
+  {% endfor %}
+  {% endfor %}
+ha_group_name: mgr_search_ops
+#10段ip
+group_replication_bootstraper: 10.1.2.128
+#group_replication_group_seeds: 172.18.12.211:2{{ port }},172.18.12.212:2{{ port }},172.18.12.213:2{{ port }}
+group_replication_group_seeds: "{%- for ip_list in (groups[group] | map('extract', hostvars, ['ansible_all_ipv4_addresses'])) -%}{%- if loop.last -%}{%- for ip in ip_list -%}{%- if ip.startswith('192.168') and not ip.startswith('192.168.3') and not ip.startswith('192.168.8') -%}{{ ip }}:2{{ mysql_port }}{%- endif -%}{%- endfor %}{%- else -%}{%- for ip in ip_list -%}{%- if ip.startswith('192.168') and not ip.startswith('192.168.3') and not ip.startswith('192.168.8') -%}{{ ip }}:2{{ mysql_port }},{%- endif -%}{%- endfor -%}{%- endif -%}{%- endfor -%}"
+group_replication_group_name: "{{ ha_group_name | to_uuid }}"

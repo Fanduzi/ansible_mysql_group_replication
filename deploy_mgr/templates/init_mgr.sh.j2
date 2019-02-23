@@ -1,0 +1,60 @@
+#!/bin/bash
+source ~/.bash_profile
+num=`ps -ef | grep {{ mysql_port }}| grep -v grep | grep mysqld|wc -l`
+mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock performance_schema -ANse "select count(*) from replication_group_members where member_host=(select @@hostname)" | grep 0
+if [ $? -ne 0 ];then
+  echo "Already MGR, failed"
+  exit 1
+fi
+if [ "$1" == "primary" ];then
+    if [ $num -lt 1 ];then
+      echo "{{ mysql_port }} dose not exists"
+      exit 1
+    else
+      mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock -Ae "\
+      change master to master_user='rpl_user',master_password='superPass' for channel 'group_replication_recovery';\
+      SET GLOBAL group_replication_bootstrap_group=ON;\
+      START GROUP_REPLICATION;\
+      SET GLOBAL group_replication_bootstrap_group=OFF;\
+      "
+      if [ $? -ne 0 ];then
+        echo "bootstrap MGR failed"
+        exit 1
+      fi
+      mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock < /mfw_rundata/tmp/addition_to_sys.sql
+      if [ $? -ne 0 ];then
+        echo "create view failed"
+        exit 1
+      fi
+      sleep 10
+      mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock sys -Ae 'select viable_candidate from gr_member_routing_candidate_status;' 2>&1 |grep YES
+    fi
+
+    if [ $? -ne 0 ];then
+      echo "init MGR failed"
+      exit 1
+    fi
+
+elif [ "$1" == "secondary" ];then
+    if [ $num -lt 1 ];then
+      echo "{{ mysql_port }} dose not exists"
+      exit 1
+    else
+      mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock -Ae "\
+      change master to master_user='rpl_user',master_password='superPass' for channel 'group_replication_recovery';\
+      START GROUP_REPLICATION;\
+      "
+      if [ $? -ne 0 ];then
+        echo "bootstrap MGR failed"
+        exit 1
+      fi
+      sleep 10
+      mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock sys -Ae 'select viable_candidate from gr_member_routing_candidate_status;' 2>&1 |grep YES
+    fi
+
+    if [ $? -ne 0 ];then
+      echo "init MGR failed"
+      exit 1
+    fi
+    
+fi

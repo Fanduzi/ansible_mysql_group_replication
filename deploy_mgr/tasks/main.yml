@@ -1,0 +1,126 @@
+---
+# tasks file for deploy_mgr
+- name: 安装依赖包 {{ mysql_port }}
+  yum:
+    name: "{{ item.line }}"
+    state: present
+  with_items:
+    - { line: 'MySQL-python' }
+
+- name: 设置/etc/hosts
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      {{ item }}
+  with_items: "{{ etc_hosts }}"
+
+- name: 拷贝脚本
+  template:
+    src: "{{ item.j2 }}"
+    dest: "{{ item.sh }}"
+    mode: 0755
+  with_items:
+    - { j2: 'init_mgr.sh.j2', sh: '/mfw_rundata/tmp/init_mgr.sh' }
+
+- name: 拷贝addition_to_sys.sql
+  copy:
+    src: "{{ item.src }}"
+    dest: /mfw_rundata/tmp/
+    mode: 0755
+  with_items:
+    - { src: 'addition_to_sys.sql' }
+
+- name: 检查是否安装了plugin
+  shell: mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock mysql -ANse "select count(*) from plugin where name='group_replication' and dl='group_replication.so'"
+  no_log: True
+  register: info_plugin
+
+- name: INSTALL PLUGIN group_replication SONAME 'group_replication.so'
+  shell: mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock  -Ae "INSTALL PLUGIN group_replication SONAME 'group_replication.so'"
+  no_log: True
+  when: ( info_plugin['stdout'] == '0' )
+
+- name: 检查是已经是MGR
+  shell: mysql -uroot -p'{{ db_pass }}' -S /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock performance_schema -ANse 'select count(*) from replication_group_members where member_host=(select @@hostname)'
+  no_log: True
+  register: info_mgr
+
+- name: 设置MGR相关variables
+  mysql_variables:
+    login_user: root
+    login_password: "{{ db_pass }}"
+    login_unix_socket: /mfw_data/mysql_{{ mysql_port }}/tmp/mysql.sock
+    variable: "{{ item.key }}"
+    value: "{{ item.value }}"
+  with_items:
+    - { key: 'read_only', value: '1' }
+    - { key: 'super_read_only', value: '1' }
+    - { key: 'binlog_transaction_dependency_history_size', value: '25000' }
+    - { key: 'group_replication_auto_increment_increment', value: '1' }
+    - { key: 'transaction_write_set_extraction', value: 'XXHASH64' }
+    - { key: 'binlog_transaction_dependency_tracking', value: 'WRITESET' }
+    - { key: 'binlog_checksum', value: 'NONE' }
+    - { key: 'group_replication_group_name', value: '{{ group_replication_group_name }}' }
+    - { key: 'group_replication_start_on_boot', value: 'off' }
+    - { key: 'group_replication_local_address', value: "{% for ip in ansible_all_ipv4_addresses -%}{% if ip.startswith('192.168') and not ip.startswith('192.168.3') and not ip.startswith('192.168.8') -%}{{ ip }}:2{{ mysql_port }}{% endif %}{% endfor %}" }
+    - { key: 'group_replication_group_seeds', value: "{{ group_replication_group_seeds }}" }
+    - { key: 'group_replication_bootstrap_group', value: 'off' }
+    - { key: 'group_replication_single_primary_mode', value: '0' }
+    - { key: 'group_replication_enforce_update_everywhere_checks', value: '1' }
+    - { key: 'group_replication_unreachable_majority_timeout', value: '120' }
+    - { key: 'group_replication_start_on_boot', value: '0' }
+  when: ( info_mgr['stdout'] == '0' )
+
+- name: bootstrap mgr 
+  shell: /mfw_rundata/tmp/init_mgr.sh primary > /mfw_rundata/tmp/init_mgr.log
+  when: ansible_ssh_host == group_replication_bootstraper
+
+- name: 集群其他成员start group_replication
+  shell: /mfw_rundata/tmp/init_mgr.sh secondary > /mfw_rundata/tmp/init_mgr.log
+  when: ansible_ssh_host != group_replication_bootstraper
+
+- name: 设置my.cnf
+  blockinfile:
+    path: /mfw_data/mysql_{{ mysql_port }}/my_{{ mysql_port }}.cnf
+    marker: "# {mark} ANSIBLE MANAGED BLOCK FOR MGR"
+    insertafter: " ###ADDITIONAL SETTINGS"
+    block: |
+      ###MGR SETTINGS
+      read_only=1
+      super_read_only=1
+      binlog_transaction_dependency_tracking = WRITESET
+      transaction-write-set-extraction = XXHASH64
+      binlog_transaction_dependency_history_size = 25000
+      loose-group_replication_auto_increment_increment = 1
+      # report_host = 127.0.0.1 # optional for group replication
+      binlog_checksum = NONE # only for group replication
+      loose-group_replication_group_name = '{{ group_replication_group_name }}'
+      loose-group_replication_start_on_boot = off
+      {% for ip in ansible_all_ipv4_addresses -%}
+        {% if ip.startswith('192.168') and not ip.startswith('192.168.3') and not ip.startswith('192.168.8') -%}
+          loose-group_replication_local_address = {{ ip }}:2{{ mysql_port }}
+        {% endif %}
+      {% endfor %}
+      shame_flag
+      loose-group_replication_group_seeds = "{{ group_replication_group_seeds }}"
+      loose-group_replication_bootstrap_group = off
+      loose_group_replication_single_primary_mode = 0
+      loose_group_replication_enforce_update_everywhere_checks = 1
+      loose_group_replication_unreachable_majority_timeout = 120
+      loose_group_replication_start_on_boot = 0
+
+- name: remove shame
+#  shell: sed -i '/\ \ shame_flag/d' /mfw_data/mysql_{{ mysql_port }}/my_{{ mysql_port }}.cnf
+  lineinfile:
+    path: /mfw_data/mysql_{{ mysql_port }}/my_{{ mysql_port }}.cnf
+    state: absent
+    regexp: '^\ \ shame_flag'
+
+- name: 删除init_mgr.sh, addition_to_sys.sql
+  file:
+    path: "{{ item.src }}"
+    state: absent
+  with_items:
+    - { src: '/mfw_rundata/tmp/init_mgr.sh' }
+    - { src: '/mfw_rundata/tmp/addition_to_sys.sql' }
+
